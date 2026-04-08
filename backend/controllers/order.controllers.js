@@ -402,7 +402,6 @@ export const acceptOrder = async (req, res) => {
 }
 
 
-
 export const getCurrentOrder = async (req, res) => {
     try {
         const assignment = await DeliveryAssignment.findOne({

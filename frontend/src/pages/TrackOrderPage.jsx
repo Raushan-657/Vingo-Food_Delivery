@@ -1,12 +1,10 @@
 import axios from 'axios'
-import React from 'react'
+import { useEffect, useState } from 'react'
+import { IoIosArrowRoundBack } from "react-icons/io"
+import { useSelector } from 'react-redux'
 import { useNavigate, useParams } from 'react-router-dom'
 import { serverUrl } from '../App'
-import { useEffect } from 'react'
-import { useState } from 'react'
-import { IoIosArrowRoundBack } from "react-icons/io";
 import DeliveryBoyTracking from '../components/DeliveryBoyTracking'
-import { useSelector } from 'react-redux'
 function TrackOrderPage() {
     const { orderId } = useParams()
     const [currentOrder, setCurrentOrder] = useState() 
@@ -23,13 +21,26 @@ function TrackOrderPage() {
     }
 
     useEffect(()=>{
-socket.on('updateDeliveryLocation',({deliveryBoyId,latitude,longitude})=>{
-setLiveLocations(prev=>({
-  ...prev,
-  [deliveryBoyId]:{lat:latitude,lon:longitude}
-}))
-})
-    },[socket])
+        if(!socket) return;
+        
+        socket.on('updateDeliveryLocation',({deliveryBoyId,latitude,longitude})=>{
+            setLiveLocations(prev=>({
+                ...prev,
+                [deliveryBoyId]:{lat:latitude,lon:longitude}
+            }))
+        })
+
+        socket.on('order-delivered',({orderId})=>{
+            if(orderId === currentOrder?._id){
+                handleGetOrder()
+            }
+        })
+
+        return () => {
+            socket.off('updateDeliveryLocation')
+            socket.off('order-delivered')
+        }
+    },[socket, orderId])
 
     useEffect(() => {
         handleGetOrder()

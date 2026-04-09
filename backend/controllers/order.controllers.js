@@ -1,25 +1,70 @@
+import dotenv from "dotenv"
+import RazorPay from "razorpay"
 import DeliveryAssignment from "../models/deliveryAssignment.model.js"
 import Order from "../models/order.model.js"
 import Shop from "../models/shop.model.js"
 import User from "../models/user.model.js"
 import { sendDeliveryOtpMail } from "../utils/mail.js"
-import RazorPay from "razorpay"
-import dotenv from "dotenv"
 
 dotenv.config()
-let instance = new RazorPay({
-    key_id: process.env.RAZORPAY_KEY_ID,
-    key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+
+// Initialize Razorpay with validation
+let instance = null
+if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
+    instance = new RazorPay({
+        key_id: process.env.RAZORPAY_KEY_ID,
+        key_secret: process.env.RAZORPAY_KEY_SECRET,
+    })
+    console.log("✅ Razorpay initialized successfully")
+} else {
+    console.warn("⚠️ Razorpay credentials not configured. Payment gateway will not work.")
+    console.warn("RAZORPAY_KEY_ID:", process.env.RAZORPAY_KEY_ID ? "✓ Set" : "✗ Not set")
+    console.warn("RAZORPAY_KEY_SECRET:", process.env.RAZORPAY_KEY_SECRET ? "✓ Set" : "✗ Not set")
+}
+
+// Helper function to extract error message from various error types
+const getErrorMessage = (error) => {
+    if (!error) return 'Unknown error'
+    if (typeof error === 'string') return error
+    if (error.message) return error.message
+    if (error.description) return error.description
+    if (error.statusCode) return `HTTP ${error.statusCode}`
+    if (error.error) return error.error
+    if (error.response?.status) return `HTTP ${error.response.status}`
+    if (error.response?.data?.error) return error.response.data.error
+    try {
+        return JSON.stringify(error)
+    } catch {
+        return 'Unknown error'
+    }
+}
 
 export const placeOrder = async (req, res) => {
     try {
         const { cartItems, paymentMethod, deliveryAddress, totalAmount } = req.body
-        if (cartItems.length == 0 || !cartItems) {
+        
+        // Validation checks
+        if (!req.userId) {
+            return res.status(401).json({ message: "user not authenticated" })
+        }
+        if (!cartItems || cartItems.length == 0) {
             return res.status(400).json({ message: "cart is empty" })
         }
-        if (!deliveryAddress.text || !deliveryAddress.latitude || !deliveryAddress.longitude) {
+        if (!deliveryAddress || !deliveryAddress.text || !deliveryAddress.latitude || !deliveryAddress.longitude) {
             return res.status(400).json({ message: "send complete deliveryAddress" })
+        }
+        if (!totalAmount || totalAmount <= 0) {
+            return res.status(400).json({ message: "invalid total amount" })
+        }
+        if (!paymentMethod || (paymentMethod !== "cod" && paymentMethod !== "online")) {
+            return res.status(400).json({ message: "invalid payment method" })
+        }
+
+        // Validate cart items have all required fields
+        const invalidItem = cartItems.find(item => !item.shop || !item.id || !item.name || !item.price || !item.quantity)
+        if (invalidItem) {
+            console.error("Invalid cart item:", invalidItem)
+            return res.status(400).json({ message: "cart items missing required fields" })
         }
 
         const groupItemsByShop = {}
@@ -35,7 +80,7 @@ export const placeOrder = async (req, res) => {
         const shopOrders = await Promise.all(Object.keys(groupItemsByShop).map(async (shopId) => {
             const shop = await Shop.findById(shopId).populate("owner")
             if (!shop) {
-                return res.status(400).json({ message: "shop not found" })
+                throw new Error(`Shop not found for ID: ${shopId}`)
             }
             const items = groupItemsByShop[shopId]
             const subtotal = items.reduce((sum, i) => sum + Number(i.price) * Number(i.quantity), 0)
@@ -44,7 +89,7 @@ export const placeOrder = async (req, res) => {
                 owner: shop.owner._id,
                 subtotal,
                 shopOrderItems: items.map((i) => ({
-                    item: i.id,
+                    item: i.id || i._id,  // Support both id and _id
                     price: i.price,
                     quantity: i.quantity,
                     name: i.name
@@ -54,71 +99,109 @@ export const placeOrder = async (req, res) => {
         ))
 
         if (paymentMethod == "online") {
-            const razorOrder = await instance.orders.create({
-                amount: Math.round(totalAmount * 100),
-                currency: 'INR',
-                receipt: `receipt_${Date.now()}`
-            })
+            // Validate Razorpay instance
+            if (!instance) {
+                console.error("Razorpay instance not initialized. Check credentials:", {
+                    hasKeyId: !!process.env.RAZORPAY_KEY_ID,
+                    hasKeySecret: !!process.env.RAZORPAY_KEY_SECRET
+                })
+                return res.status(500).json({ message: "Payment gateway not configured. Please contact support." })
+            }
+            
+            try {
+                console.log("Creating Razorpay order with amount:", totalAmount)
+                const razorOrder = await instance.orders.create({
+                    amount: Math.round(totalAmount * 100),
+                    currency: 'INR',
+                    receipt: `receipt_${Date.now()}`
+                })
+                
+                if (!razorOrder || !razorOrder.id) {
+                    console.error("Razorpay order creation failed:", razorOrder)
+                    return res.status(500).json({ message: "Failed to create payment order" })
+                }
+                
+                console.log("✅ Razorpay order created:", razorOrder.id)
+                
+                const newOrder = await Order.create({
+                    user: req.userId,
+                    paymentMethod,
+                    deliveryAddress,
+                    totalAmount,
+                    shopOrders,
+                    razorpayOrderId: razorOrder.id,
+                    payment: false
+                })
+
+                return res.status(200).json({
+                    razorOrder,
+                    orderId: newOrder._id,
+                })
+            } catch (razorError) {
+                const errorMessage = getErrorMessage(razorError)
+                console.error("Razorpay/Order creation error:", errorMessage, razorError)
+                return res.status(500).json({ message: `payment error: ${errorMessage}` })
+            }
+
+        }
+
+        try {
             const newOrder = await Order.create({
                 user: req.userId,
                 paymentMethod,
                 deliveryAddress,
                 totalAmount,
-                shopOrders,
-                razorpayOrderId: razorOrder.id,
-                payment: false
+                shopOrders
             })
 
-            return res.status(200).json({
-                razorOrder,
-                orderId: newOrder._id,
-            })
+            await newOrder.populate("shopOrders.shopOrderItems.item", "name image price")
+            await newOrder.populate("shopOrders.shop", "name")
+            await newOrder.populate("shopOrders.owner", "name socketId")
+            await newOrder.populate("user", "name email mobile")
 
+            const io = req.app.get('io')
+
+            if (io) {
+                newOrder.shopOrders.forEach(shopOrder => {
+                    const ownerSocketId = shopOrder.owner?.socketId
+                    if (ownerSocketId) {
+                        io.to(ownerSocketId).emit('newOrder', {
+                            _id: newOrder._id,
+                            paymentMethod: newOrder.paymentMethod,
+                            user: newOrder.user,
+                            shopOrders: shopOrder,
+                            createdAt: newOrder.createdAt,
+                            deliveryAddress: newOrder.deliveryAddress,
+                            payment: newOrder.payment
+                        })
+                    }
+                });
+            }
+
+            return res.status(201).json(newOrder)
+        } catch (codError) {
+            const errorMessage = getErrorMessage(codError)
+            console.error("COD order creation error:", errorMessage, codError)
+            return res.status(500).json({ message: `order creation error: ${errorMessage}` })
         }
-
-        const newOrder = await Order.create({
-            user: req.userId,
-            paymentMethod,
-            deliveryAddress,
-            totalAmount,
-            shopOrders
-        })
-
-        await newOrder.populate("shopOrders.shopOrderItems.item", "name image price")
-        await newOrder.populate("shopOrders.shop", "name")
-        await newOrder.populate("shopOrders.owner", "name socketId")
-        await newOrder.populate("user", "name email mobile")
-
-        const io = req.app.get('io')
-
-        if (io) {
-            newOrder.shopOrders.forEach(shopOrder => {
-                const ownerSocketId = shopOrder.owner.socketId
-                if (ownerSocketId) {
-                    io.to(ownerSocketId).emit('newOrder', {
-                        _id: newOrder._id,
-                        paymentMethod: newOrder.paymentMethod,
-                        user: newOrder.user,
-                        shopOrders: shopOrder,
-                        createdAt: newOrder.createdAt,
-                        deliveryAddress: newOrder.deliveryAddress,
-                        payment: newOrder.payment
-                    })
-                }
-            });
-        }
-
-
-
-        return res.status(201).json(newOrder)
     } catch (error) {
-        return res.status(500).json({ message: `place order error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Place order error:", errorMessage, error)
+        return res.status(500).json({ message: `place order error: ${errorMessage}` })
     }
 }
+
 
 export const verifyPayment = async (req, res) => {
     try {
         const { razorpay_payment_id, orderId } = req.body
+        
+        // Validate Razorpay instance
+        if (!instance) {
+            console.error("Razorpay instance not initialized for payment verification")
+            return res.status(500).json({ message: "Payment verification service not available" })
+        }
+        
         const payment = await instance.payments.fetch(razorpay_payment_id)
         if (!payment || payment.status != "captured") {
             return res.status(400).json({ message: "payment not captured" })
@@ -160,10 +243,11 @@ export const verifyPayment = async (req, res) => {
         return res.status(200).json(order)
 
     } catch (error) {
-        return res.status(500).json({ message: `verify payment  error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Verify payment error:", errorMessage, error)
+        return res.status(500).json({ message: `verify payment error: ${errorMessage}` })
     }
 }
-
 
 
 export const getMyOrders = async (req, res) => {
@@ -202,7 +286,9 @@ export const getMyOrders = async (req, res) => {
         }
 
     } catch (error) {
-        return res.status(500).json({ message: `get User order error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Get user orders error:", errorMessage, error)
+        return res.status(500).json({ message: `get User order error: ${errorMessage}` })
     }
 }
 
@@ -327,7 +413,9 @@ export const updateOrderStatus = async (req, res) => {
 
 
     } catch (error) {
-        return res.status(500).json({ message: `order status error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Update order status error:", errorMessage, error)
+        return res.status(500).json({ message: `order status error: ${errorMessage}` })
     }
 }
 
@@ -353,7 +441,9 @@ export const getDeliveryBoyAssignment = async (req, res) => {
 
         return res.status(200).json(formated)
     } catch (error) {
-        return res.status(500).json({ message: `get Assignment error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Get delivery boy assignment error:", errorMessage, error)
+        return res.status(500).json({ message: `get Assignment error: ${errorMessage}` })
     }
 }
 
@@ -390,6 +480,7 @@ export const acceptOrder = async (req, res) => {
 
         let shopOrder = order.shopOrders.id(assignment.shopOrderId)
         shopOrder.assignedDeliveryBoy = req.userId
+        shopOrder.assignment = assignment._id
         await order.save()
 
 
@@ -397,7 +488,9 @@ export const acceptOrder = async (req, res) => {
             message: 'order accepted'
         })
     } catch (error) {
-        return res.status(500).json({ message: `accept order error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Accept order error:", errorMessage, error)
+        return res.status(500).json({ message: `accept order error: ${errorMessage}` })
     }
 }
 
@@ -417,7 +510,7 @@ export const getCurrentOrder = async (req, res) => {
             })
 
         if (!assignment) {
-            return res.status(400).json({ message: "assignment not found" })
+            return res.status(400).json({ message: "No active assignment found. Please accept an order first." })
         }
         if (!assignment.order) {
             return res.status(400).json({ message: "order not found" })
@@ -450,11 +543,12 @@ export const getCurrentOrder = async (req, res) => {
             customerLocation
         })
 
-
     } catch (error) {
-
+        console.error("Get current order error:", error.message)
+        return res.status(500).json({ message: `Error fetching current order: ${error.message}` })
     }
 }
+
 
 export const getOrderById = async (req, res) => {
     try {
@@ -480,9 +574,12 @@ export const getOrderById = async (req, res) => {
         }
         return res.status(200).json(order)
     } catch (error) {
-        return res.status(500).json({ message: `get by id order error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Get order by ID error:", errorMessage, error)
+        return res.status(500).json({ message: `get by id order error: ${errorMessage}` })
     }
 }
+
 
 export const sendDeliveryOtp = async (req, res) => {
     try {
@@ -499,9 +596,12 @@ export const sendDeliveryOtp = async (req, res) => {
         await sendDeliveryOtpMail(order.user, otp)
         return res.status(200).json({ message: `Otp sent Successfuly to ${order?.user?.fullName}` })
     } catch (error) {
-        return res.status(500).json({ message: `delivery otp error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Send delivery OTP error:", errorMessage, error)
+        return res.status(500).json({ message: `delivery otp error: ${errorMessage}` })
     }
 }
+
 
 export const verifyDeliveryOtp = async (req, res) => {
     try {
@@ -524,14 +624,99 @@ export const verifyDeliveryOtp = async (req, res) => {
             assignedTo: shopOrder.assignedDeliveryBoy
         })
 
+        // Emit socket events to delivery boy, owner, and user
+        const io = req.app.get('io')
+        if (io) {
+            // Notify delivery boy about completed delivery for earnings update
+            if (shopOrder.assignedDeliveryBoy) {
+                const deliveryBoyUser = await User.findById(shopOrder.assignedDeliveryBoy)
+                if (deliveryBoyUser?.socketId) {
+                    io.to(deliveryBoyUser.socketId).emit('deliveryCompleted', {
+                        orderId: order._id,
+                        shopOrderId: shopOrder._id,
+                        message: "Your delivery earnings have been updated"
+                    })
+                }
+            }
+
+            // Notify owner about order completion
+            const owner = await User.findById(shopOrder.owner)
+            if (owner?.socketId) {
+                io.to(owner.socketId).emit('order-delivered', {
+                    orderId: order._id,
+                    shopId: shopOrder.shop,
+                    shopOrderId: shopOrder._id,
+                    status: 'delivered'
+                })
+            }
+
+            // Notify user about order delivery
+            if (order.user?.socketId) {
+                io.to(order.user.socketId).emit('order-delivered', {
+                    orderId: order._id,
+                    shopId: shopOrder.shop,
+                    shopOrderId: shopOrder._id,
+                    status: 'delivered'
+                })
+            }
+        }
+
         return res.status(200).json({ message: "Order Delivered Successfully!" })
 
     } catch (error) {
-        return res.status(500).json({ message: `verify delivery otp error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Verify delivery OTP error:", errorMessage, error)
+        return res.status(500).json({ message: `verify delivery otp error: ${errorMessage}` })
     }
 }
 
 
+export const getTodayDeliveries=async (req,res) => {
+    try {
+        const deliveryBoyId=req.userId
+        const startsOfDay=new Date()
+        startsOfDay.setHours(0,0,0,0)
 
+        const orders=await Order.find({
+           "shopOrders.assignedDeliveryBoy":deliveryBoyId,
+           "shopOrders.status":"delivered",
+           "shopOrders.deliveredAt":{$gte:startsOfDay}
+        }).lean()
 
+     let todaysDeliveries=[] 
+     
+     orders.forEach(order=>{
+        order.shopOrders.forEach(shopOrder=>{
+            if(shopOrder.assignedDeliveryBoy==deliveryBoyId &&
+                shopOrder.status=="delivered" &&
+                shopOrder.deliveredAt &&
+                shopOrder.deliveredAt>=startsOfDay
+            ){
+                todaysDeliveries.push(shopOrder)
+            }
+        })
+     })
 
+let stats={}
+
+todaysDeliveries.forEach(shopOrder=>{
+    const hour=new Date(shopOrder.deliveredAt).getHours()
+    stats[hour]=(stats[hour] || 0) + 1
+})
+
+let formattedStats=Object.keys(stats).map(hour=>({
+ hour:parseInt(hour),
+ count:stats[hour]   
+}))
+
+formattedStats.sort((a,b)=>a.hour-b.hour)
+
+return res.status(200).json(formattedStats)
+  
+
+    } catch (error) {
+        const errorMessage = getErrorMessage(error)
+        console.error("Get today deliveries error:", errorMessage, error)
+        return res.status(500).json({ message: `today deliveries error: ${errorMessage}` })
+    }
+}

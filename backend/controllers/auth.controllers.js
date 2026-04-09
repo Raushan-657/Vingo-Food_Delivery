@@ -1,7 +1,22 @@
+import bcrypt from "bcryptjs"
 import User from "../models/user.model.js"
-import bcrypt, { hash } from "bcryptjs"
-import genToken from "../utils/token.js"
 import { sendOtpMail } from "../utils/mail.js"
+import genToken from "../utils/token.js"
+
+// Helper function to extract error message from various error types
+const getErrorMessage = (error) => {
+    if (!error) return 'Unknown error'
+    if (typeof error === 'string') return error
+    if (error.message) return error.message
+    if (error.description) return error.description
+    if (error.statusCode) return `HTTP ${error.statusCode}`
+    if (error.error) return error.error
+    try {
+        return JSON.stringify(error)
+    } catch {
+        return 'Unknown error'
+    }
+}
 export const signUp=async (req,res) => {
     try {
         const {fullName,email,password,mobile,role}=req.body
@@ -36,7 +51,9 @@ export const signUp=async (req,res) => {
         return res.status(201).json(user)
 
     } catch (error) {
-        return res.status(500).json(`sign up error ${error}`)
+        const errorMessage = getErrorMessage(error)
+        console.error("Sign up error:", errorMessage, error)
+        return res.status(500).json({message: `sign up error: ${errorMessage}`})
     }
 }
 
@@ -64,7 +81,9 @@ export const signIn=async (req,res) => {
         return res.status(200).json(user)
 
     } catch (error) {
-        return res.status(500).json(`sign In error ${error}`)
+        const errorMessage = getErrorMessage(error)
+        console.error("Sign in error:", errorMessage, error)
+        return res.status(500).json({message: `sign in error: ${errorMessage}`})
     }
 }
 
@@ -73,7 +92,9 @@ export const signOut=async (req,res) => {
         res.clearCookie("token")
 return res.status(200).json({message:"log out successfully"})
     } catch (error) {
-        return res.status(500).json(`sign out error ${error}`)
+        const errorMessage = getErrorMessage(error)
+        console.error("Sign out error:", errorMessage, error)
+        return res.status(500).json({message: `sign out error: ${errorMessage}`})
     }
 }
 
@@ -92,7 +113,9 @@ export const sendOtp=async (req,res) => {
     await sendOtpMail(email,otp)
     return res.status(200).json({message:"otp sent successfully"})
   } catch (error) {
-     return res.status(500).json(`send otp error ${error}`)
+     const errorMessage = getErrorMessage(error)
+     console.error("Send OTP error:", errorMessage, error)
+     return res.status(500).json({message: `send otp error: ${errorMessage}`})
   }  
 }
 
@@ -109,7 +132,9 @@ export const verifyOtp=async (req,res) => {
         await user.save()
         return res.status(200).json({message:"otp verify successfully"})
     } catch (error) {
-         return res.status(500).json(`verify otp error ${error}`)
+         const errorMessage = getErrorMessage(error)
+         console.error("Verify OTP error:", errorMessage, error)
+         return res.status(500).json({message: `verify otp error: ${errorMessage}`})
     }
 }
 
@@ -126,7 +151,9 @@ export const resetPassword=async (req,res) => {
     await user.save()
      return res.status(200).json({message:"password reset successfully"})
     } catch (error) {
-         return res.status(500).json(`reset password error ${error}`)
+         const errorMessage = getErrorMessage(error)
+         console.error("Reset password error:", errorMessage, error)
+         return res.status(500).json({message: `reset password error: ${errorMessage}`})
     }
 }
 
@@ -152,6 +179,8 @@ export const googleAuth=async (req,res) => {
 
 
     } catch (error) {
-         return res.status(500).json(`googleAuth error ${error}`)
+         const errorMessage = getErrorMessage(error)
+         console.error("Google auth error:", errorMessage, error)
+         return res.status(500).json({message: `googleAuth error: ${errorMessage}`})
     }
 }

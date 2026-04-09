@@ -2,6 +2,21 @@ import Item from "../models/item.model.js";
 import Shop from "../models/shop.model.js";
 import uploadOnCloudinary from "../utils/cloudinary.js";
 
+// Helper function to extract error message from various error types
+const getErrorMessage = (error) => {
+    if (!error) return 'Unknown error'
+    if (typeof error === 'string') return error
+    if (error.message) return error.message
+    if (error.description) return error.description
+    if (error.statusCode) return `HTTP ${error.statusCode}`
+    if (error.error) return error.error
+    try {
+        return JSON.stringify(error)
+    } catch {
+        return 'Unknown error'
+    }
+}
+
 export const addItem = async (req, res) => {
     try {
         const { name, category, foodType, price } = req.body
@@ -27,7 +42,9 @@ export const addItem = async (req, res) => {
         return res.status(201).json(shop)
 
     } catch (error) {
-        return res.status(500).json({ message: `add item error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Add item error:", errorMessage, error)
+        return res.status(500).json({ message: `add item error: ${errorMessage}` })
     }
 }
 
@@ -52,7 +69,9 @@ export const editItem = async (req, res) => {
         return res.status(200).json(shop)
 
     } catch (error) {
-        return res.status(500).json({ message: `edit item error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Edit item error:", errorMessage, error)
+        return res.status(500).json({ message: `edit item error: ${errorMessage}` })
     }
 }
 
@@ -65,7 +84,9 @@ export const getItemById = async (req, res) => {
         }
         return res.status(200).json(item)
     } catch (error) {
-        return res.status(500).json({ message: `get item error ${error}` })
+        const errorMessage = getErrorMessage(error)
+        console.error("Get item error:", errorMessage, error)
+        return res.status(500).json({ message: `get item error: ${errorMessage}` })
     }
 }
 
@@ -161,11 +182,12 @@ export const rating=async (req,res) => {
     try {
         const {itemId,rating}=req.body
 
-        if(!itemId || !rating){
+        if(!itemId || rating === undefined || rating === null){
             return res.status(400).json({message:"itemId and rating is required"})
         }
 
-        if(rating<1 || rating>5){
+        const ratingValue = parseInt(rating)
+        if(isNaN(ratingValue) || ratingValue<1 || ratingValue>5){
              return res.status(400).json({message:"rating must be between 1 to 5"})
         }
 
@@ -174,15 +196,34 @@ export const rating=async (req,res) => {
               return res.status(400).json({message:"item not found"})
         }
 
-        const newCount=item.rating.count + 1
-        const newAverage=(item.rating.average*item.rating.count + rating)/newCount
+        // Initialize rating if it doesn't exist or is incomplete
+        if(!item.rating || item.rating === null || typeof item.rating !== 'object') {
+            item.rating = { average: 0, count: 0 }
+        }
+        
+        // Ensure count and average are valid numbers
+        const currentCount = item.rating.count || 0
+        const currentAverage = item.rating.average || 0
 
-        item.rating.count=newCount
-        item.rating.average=newAverage
-        await item.save()
-return res.status(200).json({rating:item.rating})
+        const newCount = currentCount + 1
+        const newAverage = (currentAverage * currentCount + ratingValue) / newCount
+
+        // Use findByIdAndUpdate to avoid full document validation
+        const updatedItem = await Item.findByIdAndUpdate(
+            itemId,
+            {
+                $set: {
+                    'rating.count': newCount,
+                    'rating.average': newAverage
+                }
+            },
+            { new: true }
+        )
+        
+        return res.status(200).json({rating:updatedItem.rating})
 
     } catch (error) {
-         return res.status(500).json({ message: `rating error ${error}` })
+         console.error("Rating error details:", error)
+         return res.status(500).json({ message: `rating error ${error.message}` })
     }
 }

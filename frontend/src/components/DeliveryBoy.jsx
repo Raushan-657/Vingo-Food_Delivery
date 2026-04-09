@@ -1,12 +1,11 @@
-import React from 'react'
-import Nav from './NaV.JSX'
-import { useSelector } from 'react-redux'
 import axios from 'axios'
-import { serverUrl } from '../App'
-import { useEffect } from 'react'
-import { useState } from 'react'
-import DeliveryBoyTracking from './DeliveryBoyTracking'
+import { useEffect, useState } from 'react'
+import { useSelector } from 'react-redux'
 import { ClipLoader } from 'react-spinners'
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { serverUrl } from '../App'
+import DeliveryBoyTracking from './DeliveryBoyTracking'
+import Nav from './Nav'
 
 function DeliveryBoy() {
   const {userData,socket}=useSelector(state=>state.user)
@@ -14,6 +13,7 @@ function DeliveryBoy() {
   const [showOtpBox,setShowOtpBox]=useState(false)
   const [availableAssignments,setAvailableAssignments]=useState(null)
   const [otp,setOtp]=useState("")
+  const [todayDeliveries,setTodayDeliveries]=useState([])
 const [deliveryBoyLocation,setDeliveryBoyLocation]=useState(null)
 const [loading,setLoading]=useState(false)
 const [message,setMessage]=useState("")
@@ -46,24 +46,34 @@ return ()=>{
   },[socket,userData])
 
 
+const ratePerDelivery=50
+const totalEarning=todayDeliveries.reduce((sum,d)=>sum + d.count*ratePerDelivery,0)
+
 
 
   const getAssignments=async () => {
     try {
       const result=await axios.get(`${serverUrl}/api/order/get-assignments`,{withCredentials:true})
-      
       setAvailableAssignments(result.data)
+      console.log("Assignments fetched:", result.data)
     } catch (error) {
-      console.log(error)
+      console.error("Error fetching assignments:", error.response?.data?.message || error.message)
+      setAvailableAssignments([])
     }
   }
 
   const getCurrentOrder=async () => {
      try {
       const result=await axios.get(`${serverUrl}/api/order/get-current-order`,{withCredentials:true})
-    setCurrentOrder(result.data)
+      setCurrentOrder(result.data)
     } catch (error) {
-      console.log(error)
+      // 400 error means no active assignment - this is normal
+      if(error.response?.status === 400) {
+        console.log("No active assignment:", error.response.data.message)
+        setCurrentOrder(null)
+      } else {
+        console.error("Error getting current order:", error.message)
+      }
     }
   }
 
@@ -71,10 +81,13 @@ return ()=>{
   const acceptOrder=async (assignmentId) => {
     try {
       const result=await axios.get(`${serverUrl}/api/order/accept-order/${assignmentId}`,{withCredentials:true})
-    console.log(result.data)
-    await getCurrentOrder()
+      console.log("Order accepted:", result.data)
+      await getCurrentOrder()
+      // Refresh assignments after accepting an order
+      await getAssignments()
     } catch (error) {
-      console.log(error)
+      console.error("Error accepting order:", error.response?.data?.message || error.message)
+      alert(`Failed to accept order: ${error.response?.data?.message || error.message}`)
     }
   }
 
@@ -91,45 +104,118 @@ return ()=>{
     setLoading(true)
     try {
       const result=await axios.post(`${serverUrl}/api/order/send-delivery-otp`,{
-        orderId:currentOrder._id,shopOrderId:currentOrder.shopOrder._id
+        orderId:currentOrder._id,
+        shopOrderId:currentOrder.shopOrder._id
       },{withCredentials:true})
       setLoading(false)
-       setShowOtpBox(true)
-    console.log(result.data)
+      setShowOtpBox(true)
+      console.log("OTP sent:", result.data)
+      alert("OTP sent successfully to customer")
     } catch (error) {
-      console.log(error)
       setLoading(false)
+      console.error("Error sending OTP:", error.response?.data?.message || error.message)
+      alert(`Failed to send OTP: ${error.response?.data?.message || error.message}`)
     }
   }
    const verifyOtp=async () => {
     setMessage("")
     try {
       const result=await axios.post(`${serverUrl}/api/order/verify-delivery-otp`,{
-        orderId:currentOrder._id,shopOrderId:currentOrder.shopOrder._id,otp
+        orderId:currentOrder._id,
+        shopOrderId:currentOrder.shopOrder._id,
+        otp
       },{withCredentials:true})
-    console.log(result.data)
-    setMessage(result.data.message)
+      console.log("OTP verified:", result.data)
+      setMessage(result.data.message)
+      
+      // Refresh data after successful OTP verification instead of page reload
+      setTimeout(async () => {
+        setOtp("")
+        setCurrentOrder(null)
+        await getAssignments()
+        await handleTodayDeliveries()
+        setMessage("") 
+      }, 1500)
     } catch (error) {
-      console.log(error)
+      console.error("OTP verification error:", error.response?.data?.message || error.message)
+      setMessage(`Failed: ${error.response?.data?.message || error.message}`)
+      alert(`OTP verification failed: ${error.response?.data?.message || error.message}`)
     }
   }
 
 
+   const handleTodayDeliveries=async () => {
+    try {
+      const result=await axios.get(`${serverUrl}/api/order/get-today-deliveries`,{withCredentials:true})
+      console.log("Today's deliveries:", result.data)
+      setTodayDeliveries(result.data)
+    } catch (error) {
+      console.error("Error fetching today's deliveries:", error.response?.data?.message || error.message)
+      setTodayDeliveries([])
+    }
+  }
 
- 
+  // Fetch today's deliveries on component mount and set up periodic refresh
+  useEffect(() => {
+    if (userData?.role === "deliveryBoy") {
+      // Fetch all data on mount
+      getAssignments()
+      getCurrentOrder()
+      handleTodayDeliveries()
+      
+      const interval = setInterval(() => {
+        handleTodayDeliveries()
+      }, 30000)
+      
+      return () => clearInterval(interval)
+    }
+  }, [userData])
 
-  useEffect(()=>{
-getAssignments()
-getCurrentOrder()
-  },[userData])
+  useEffect(() => {
+    if (!socket) return
+
+    const handleDeliveryCompleted = async (data) => {
+      console.log("Delivery completed event received:", data)
+      await handleTodayDeliveries()
+    }
+
+    socket.on('deliveryCompleted', handleDeliveryCompleted)
+
+    return () => {
+      socket.off('deliveryCompleted', handleDeliveryCompleted)
+    }
+  }, [socket])
+
   return (
-    <div className='w-screen min-h-screen flex flex-col gap-5 items-center bg-[#fff9f6] overflow-y-auto'>
+    <div className='w-full min-h-screen bg-[#fff9f6]'>
       <Nav/>
-      <div className='w-full max-w-[800px] flex flex-col gap-5 items-center'>
-    <div className='bg-white rounded-2xl shadow-md p-5 flex flex-col justify-start items-center w-[90%] border border-orange-100 text-center gap-2'>
-<h1 className='text-xl font-bold text-[#ff4d2d]'>Welcome, {userData.fullName}</h1>
+      <div className='flex flex-col items-center py-8 gap-6 pt-[80px]'>
+
+      <div className='bg-white rounded-2xl shadow-md p-5 w-[90%] border border-orange-100'>
+        <h2 className='text-lg font-bold mb-4'>📍 Delivery Boy Location</h2>
 <p className='text-[#ff4d2d] '><span className='font-semibold'>Latitude:</span> {deliveryBoyLocation?.lat}, <span className='font-semibold'>Longitude:</span> {deliveryBoyLocation?.lon}</p>
     </div>
+
+<div className='bg-white rounded-2xl shadow-md p-5 w-[90%] mb-6 border border-orange-100'>
+  <h1 className='text-lg font-bold mb-3 text-[#ff4d2d] '>Today Deliveries</h1>
+
+  <ResponsiveContainer width="100%" height={200}>
+   <BarChart data={todayDeliveries}>
+  <CartesianGrid strokeDasharray="3 3"/>
+  <XAxis dataKey="hour" tickFormatter={(h)=>`${h}:00`}/>
+    <YAxis  allowDecimals={false}/>
+    <Tooltip formatter={(value)=>[value,"orders"]} labelFormatter={label=>`${label}:00`}/>
+      <Bar dataKey="count" fill='#ff4d2d'/>
+   </BarChart>
+  </ResponsiveContainer>
+
+  <div className='max-w-sm mx-auto mt-6 p-6 bg-white rounded-2xl shadow-lg text-center'>
+<h1 className='text-xl font-semibold text-gray-800 mb-2'>Today's Earning</h1>
+<span className='text-3xl font-bold text-green-600'>₹{totalEarning}</span>
+  </div>
+</div>
+
+
 {!currentOrder && <div className='bg-white rounded-2xl p-5 shadow-md w-[90%] border border-orange-100'>
 <h1 className='text-lg font-bold mb-4 flex items-center gap-2'>Available Orders</h1>
 

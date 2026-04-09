@@ -1,19 +1,18 @@
-import React, { useEffect, useState } from 'react'
+import axios from 'axios';
+import "leaflet/dist/leaflet.css";
+import { useEffect, useState } from 'react';
+import { FaCreditCard } from "react-icons/fa";
+import { FaMobileScreenButton } from "react-icons/fa6";
 import { IoIosArrowRoundBack } from "react-icons/io";
-import { IoSearchOutline } from "react-icons/io5";
+import { IoLocationSharp, IoSearchOutline } from "react-icons/io5";
+import { MdDeliveryDining } from "react-icons/md";
 import { TbCurrentLocation } from "react-icons/tb";
-import { IoLocationSharp } from "react-icons/io5";
 import { MapContainer, Marker, TileLayer, useMap } from 'react-leaflet';
 import { useDispatch, useSelector } from 'react-redux';
-import "leaflet/dist/leaflet.css"
-import { setAddress, setLocation } from '../redux/mapSlice';
-import { MdDeliveryDining } from "react-icons/md";
-import { FaCreditCard } from "react-icons/fa";
-import axios from 'axios';
-import { FaMobileScreenButton } from "react-icons/fa6";
 import { useNavigate } from 'react-router-dom';
 import { serverUrl } from '../App';
-import { addMyOrder, setTotalAmount } from '../redux/userSlice';
+import { setAddress, setLocation } from '../redux/mapSlice';
+import { addMyOrder } from '../redux/userSlice';
 function RecenterMap({ location }) {
   if (location.lat && location.lon) {
     const map = useMap()
@@ -75,6 +74,22 @@ function CheckOut() {
 
   const handlePlaceOrder=async () => {
     try {
+      // Validate address input first
+      if (!addressInput || addressInput.trim() === "") {
+        alert("Please enter a delivery address")
+        return
+      }
+      // Validate location is set
+      if (!location.lat || !location.lon) {
+        alert("Please select a valid delivery location on the map")
+        return
+      }
+      // Validate cart
+      if (cartItems.length === 0) {
+        alert("Cart is empty")
+        return
+      }
+      
       const result=await axios.post(`${serverUrl}/api/order/place-order`,{
         paymentMethod,
         deliveryAddress:{
@@ -87,45 +102,66 @@ function CheckOut() {
       },{withCredentials:true})
 
       if(paymentMethod=="cod"){
-      dispatch(addMyOrder(result.data))
-      navigate("/order-placed")
-      }else{
+        dispatch(addMyOrder(result.data))
+        navigate("/order-placed")
+      } else if(paymentMethod=="online"){
         const orderId=result.data.orderId
         const razorOrder=result.data.razorOrder
+        if(orderId && razorOrder) {
           openRazorpayWindow(orderId,razorOrder)
-       }
+        } else {
+          alert("Failed to initialize payment gateway")
+        }
+      }
     
     } catch (error) {
-      console.log(error)
+      console.error("Order placement error:", error.response?.data || error.message)
+      alert(`Order failed: ${error.response?.data?.message || error.message}`)
     }
   }
 
 const openRazorpayWindow=(orderId,razorOrder)=>{
+  // Check if Razorpay is loaded
+  if(!window.Razorpay) {
+    alert("Payment gateway not loaded. Please refresh and try again.")
+    return
+  }
+
+  if(!import.meta.env.VITE_RAZORPAY_KEY_ID) {
+    alert("Payment gateway configuration missing")
+    console.error("Razorpay Key ID not found in env")
+    return
+  }
 
   const options={
- key:import.meta.env.VITE_RAZORPAY_KEY_ID,
- amount:razorOrder.amount,
- currency:'INR',
- name:"Vingo",
- description:"Food Delivery Website",
- order_id:razorOrder.id,
- handler:async function (response) {
-  try {
-    const result=await axios.post(`${serverUrl}/api/order/verify-payment`,{
-      razorpay_payment_id:response.razorpay_payment_id,
-      orderId
-    },{withCredentials:true})
+    key: import.meta.env.VITE_RAZORPAY_KEY_ID,
+    amount: razorOrder.amount,
+    currency: 'INR',
+    name: "Vingo",
+    description: "Food Delivery Website",
+    order_id: razorOrder.id,
+    handler: async function (response) {
+      try {
+        const result=await axios.post(`${serverUrl}/api/order/verify-payment`,{
+          razorpay_payment_id:response.razorpay_payment_id,
+          orderId
+        },{withCredentials:true})
         dispatch(addMyOrder(result.data))
-      navigate("/order-placed")
+        navigate("/order-placed")
+      } catch (error) {
+        console.error("Payment verification error:", error.response?.data || error.message)
+        alert(`Payment verification failed: ${error.response?.data?.message || error.message}`)
+      }
+    }
+  }
+
+  try {
+    const rzp=new window.Razorpay(options)
+    rzp.open()
   } catch (error) {
-    console.log(error)
+    console.error("Razorpay initialization error:", error)
+    alert("Failed to open payment gateway")
   }
- }
-  }
-
-  const rzp=new window.Razorpay(options)
-  rzp.open()
-
 
 }
 
@@ -133,6 +169,14 @@ const openRazorpayWindow=(orderId,razorOrder)=>{
   useEffect(() => {
     setAddressInput(address)
   }, [address])
+
+  // Auto-set current location on component mount if location is not already set
+  useEffect(() => {
+    if (!location.lat || !location.lon) {
+      getCurrentLocation()
+    }
+  }, [])
+
   return (
     <div className='min-h-screen bg-[#fff9f6] flex items-center justify-center p-6'>
       <div className=' absolute top-[20px] left-[20px] z-[10]' onClick={() => navigate("/")}>

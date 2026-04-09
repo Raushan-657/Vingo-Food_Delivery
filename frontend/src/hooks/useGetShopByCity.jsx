@@ -8,13 +8,19 @@ function useGetShopByCity() {
     const dispatch=useDispatch()
     const {currentCity}=useSelector(state=>state.user)
   useEffect(()=>{
+  if(!currentCity) {
+    dispatch(setShopsInMyCity([]))
+    return
+  }
+  
   const fetchShops=async () => {
     try {
            const result=await axios.get(`${serverUrl}/api/shop/get-by-city/${currentCity}`,{withCredentials:true})
-            dispatch(setShopsInMyCity(result.data))
-           console.log(result.data)
+            dispatch(setShopsInMyCity(result.data || []))
+           console.log("Shops fetched:", result.data)
     } catch (error) {
-        console.log(error)
+        console.error("Error fetching shops:", error)
+        dispatch(setShopsInMyCity([]))
     }
 }
 fetchShops()

@@ -5,7 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { categories } from '../category';
 import CategoryCard from './CategoryCard';
 import FoodCard from './FoodCard';
-import Nav from './NaV.JSX';
+import Nav from './Nav';
 
 function UserDashboard() {
   const {currentCity,shopInMyCity,itemsInMyCity,searchItems}=useSelector(state=>state.user)
